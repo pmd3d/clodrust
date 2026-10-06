@@ -2,7 +2,7 @@
 #![allow(non_snake_case)]
 
 use super::Assembly::*;
-use super::{AssemblySymbols, Rounding};
+use super::{AssemblySymbols, CheckedLayout, TypeUtils};
 use std::collections::BTreeMap;
 
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
@@ -15,8 +15,9 @@ pub fn calculateOffset(mut state: ReplacementState, name: &str) -> (ReplacementS
     let size = AssemblySymbols::getSize(name);
     let alignment = AssemblySymbols::getAlignment(name);
     let offset =
-        Rounding::round_away_from_zero(alignment.into(), (state.current_offset - size).into())
-            as i32;
+        CheckedLayout::stack_slot(state.current_offset, size, alignment).unwrap_or_else(|| {
+            panic!("Stack layout exceeds supported range or has invalid size/alignment")
+        });
     state.current_offset = offset;
     state.offset_map.insert(name.to_owned(), offset);
     (state, offset)
@@ -41,10 +42,19 @@ pub fn replaceOperand(
             (state, AsmOperand::Data(name, offset))
         }
         AsmOperand::PseudoMem(name, offset) => match state.offset_map.get(&name).copied() {
-            Some(var_offset) => (state, AsmOperand::Memory(AsmReg::BP, offset + var_offset)),
+            Some(var_offset) => (
+                state,
+                AsmOperand::Memory(AsmReg::BP, TypeUtils::offset_add(var_offset, offset as i64)),
+            ),
             None => {
                 let (state, var_offset) = calculateOffset(state, &name);
-                (state, AsmOperand::Memory(AsmReg::BP, offset + var_offset))
+                (
+                    state,
+                    AsmOperand::Memory(
+                        AsmReg::BP,
+                        TypeUtils::offset_add(var_offset, offset as i64),
+                    ),
+                )
             }
         },
         other => (state, other),

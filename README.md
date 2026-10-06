@@ -41,6 +41,20 @@ to retain generated assembly. Run `cargo run -- --help` for the complete usage.
 cargo test
 ```
 
+## Verify arithmetic and layout with Verus
+
+```bash
+./verification/install.sh
+python3 verification/verify.py
+python3 verification/verify.py --bugs
+python3 verification/verify.py --mutations
+```
+
+The production layout kernels are checked against mathematical contracts.
+The latter two commands demonstrate bug detection with historical failures and
+deliberate mutations. See [verification/README.md](verification/README.md) for
+the pinned toolchain, expected results, proof coverage, and how to verify edits.
+
 ## Port inventory
 
 The source tree retains a Rust module for every F# compilation unit from the

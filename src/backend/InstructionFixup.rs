@@ -1,7 +1,7 @@
 //! Rewrite assembly IR instructions that violate x86-64 operand constraints.
 #![allow(non_snake_case)]
 use super::Assembly::*;
-use super::{AssemblySymbols, Rounding};
+use super::{AssemblySymbols, CheckedLayout, TypeUtils};
 
 pub fn isLarge(i: i64) -> bool {
     i > i32::MAX as i64 || i < i32::MIN as i64
@@ -243,20 +243,21 @@ pub fn fixupInstruction(callee: &[AsmReg], i: AsmInstruction) -> Vec<AsmInstruct
 }
 
 pub fn emitStackAdjustment(bytes: i32, callee_count: usize) -> AsmInstruction {
-    let saved = 8 * callee_count as i32;
-    let total = saved + bytes;
-    let adjusted = Rounding::round_away_from_zero(16, total.into()) as i32;
+    let adjustment =
+        CheckedLayout::frame_adjustment(bytes as i64, TypeUtils::layout_i64(callee_count as i128))
+            .unwrap_or_else(|| panic!("Stack frame exceeds supported 32-bit range"));
     AsmInstruction::Binary(AsmBinaryInfo {
         op: AsmBinaryOperator::Sub,
         t: AsmType::Quadword,
-        src: AsmOperand::Imm((adjusted - saved).into()),
+        src: AsmOperand::Imm(adjustment.into()),
         dst: AsmOperand::Reg(AsmReg::SP),
     })
 }
 pub fn fixupTl(top: AsmTopLevel) -> AsmTopLevel {
     match top {
         AsmTopLevel::Function(mut f) => {
-            let bytes = -AssemblySymbols::getBytesRequired(&f.name);
+            let bytes =
+                TypeUtils::layout_i32(-(AssemblySymbols::getBytesRequired(&f.name) as i128));
             let regs: Vec<_> = AssemblySymbols::getCalleeSavedRegsUsed(&f.name)
                 .into_iter()
                 .collect();

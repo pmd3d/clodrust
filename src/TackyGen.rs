@@ -46,12 +46,12 @@ impl Generator {
     }
     fn ptr_scale(t: &Type) -> i32 {
         match t {
-            Type::Pointer(r) => TypeUtils::get_size(r) as i32,
+            Type::Pointer(r) => TypeUtils::get_size_i32(r),
             _ => panic!("Internal error: tried to get scale of non-pointer type: {t:?}"),
         }
     }
     fn member_offset(member: &str, t: &Type) -> i32 {
-        match t { Type::Struct(tag) => TypeTable::find(tag).members.get(member).unwrap_or_else(|| panic!("Internal error: failed to find member {member} in structure {tag}")).offset as i32, _ => panic!("Internal error: tried to get offset of member {member} within non-structure type {t:?}") }
+        match t { Type::Struct(tag) => TypeUtils::layout_i32(TypeTable::find(tag).members.get(member).unwrap_or_else(|| panic!("Internal error: failed to find member {member} in structure {tag}")).offset as i128), _ => panic!("Internal error: tried to get offset of member {member} within non-structure type {t:?}") }
     }
     fn member_ptr_offset(member: &str, t: &Type) -> i32 {
         match t { Type::Pointer(inner) => Self::member_offset(member, inner), _ => panic!("Internal error: trying to get member through pointer but {t:?} is not a pointer type") }
@@ -518,7 +518,7 @@ impl Generator {
                 offset,
             }));
             p += n;
-            offset += n as i32
+            offset = TypeUtils::offset_add(offset, n as i64)
         }
         out
     }
@@ -554,7 +554,7 @@ impl Generator {
                 for (i, x) in xs.iter().enumerate() {
                     out.extend(self.compound_init(
                         name,
-                        offset + i as i32 * TypeUtils::get_size(elem) as i32,
+                        TypeUtils::offset_add(offset, TypeUtils::layout_i64(i as i128 * TypeUtils::get_size(elem) as i128)),
                         x,
                     ))
                 }
@@ -564,7 +564,7 @@ impl Generator {
                 let members = TypeTable::get_members(tag);
                 let mut out = vec![];
                 for (m, x) in members.iter().zip(xs) {
-                    out.extend(self.compound_init(name, offset + m.offset as i32, x))
+                    out.extend(self.compound_init(name, TypeUtils::offset_add(offset, TypeUtils::layout_i64(m.offset as i128)), x))
                 }
                 out
             }
@@ -729,7 +729,7 @@ pub fn convertSymbolsToTacky(symbols: Vec<(String, Symbols::SymbolEntry)>) -> Ve
         .collect()
 }
 fn zero_initializer(t: &Type) -> Vec<StaticInit> {
-    vec![StaticInit::ZeroInit(TypeUtils::get_size(t) as i32)]
+    vec![StaticInit::ZeroInit(TypeUtils::get_size_i32(t))]
 }
 pub fn gen(counter: Counter, program: TypedProgram) -> (Counter, TackyProgram) {
     let mut g = Generator { counter };

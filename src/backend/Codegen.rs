@@ -117,20 +117,29 @@ impl Context {
 }
 
 pub fn getEightbyteType(index: usize, total_size: usize) -> AsmType {
-    match total_size - index * 8 {
+    let offset = super::CheckedLayout::array_size(TypeUtils::layout_i64(index as i128), 8)
+        .unwrap_or_else(|| panic!("Eightbyte offset exceeds supported range"));
+    let remaining = TypeUtils::layout_i64(total_size as i128) - offset;
+    assert!(
+        remaining > 0,
+        "Internal error: eightbyte index is outside object layout"
+    );
+    match remaining {
         n if n >= 8 => AsmType::Quadword,
         4 => AsmType::Longword,
         1 => AsmType::Byte,
         n => AsmType::ByteArray(AsmByteArrayInfo {
-            size: n as i32,
+            size: TypeUtils::layout_i32(n as i128),
             alignment: 8,
         }),
     }
 }
 pub fn addOffset(n: i32, value: &AsmOperand) -> AsmOperand {
     match value {
-        AsmOperand::PseudoMem(b, o) => AsmOperand::PseudoMem(b.clone(), o + n),
-        AsmOperand::Memory(r, o) => AsmOperand::Memory(*r, o + n),
+        AsmOperand::PseudoMem(b, o) => {
+            AsmOperand::PseudoMem(b.clone(), TypeUtils::offset_add(*o, n as i64))
+        }
+        AsmOperand::Memory(r, o) => AsmOperand::Memory(*r, TypeUtils::offset_add(*o, n as i64)),
         _ => panic!("Internal error: trying to copy data to or from non-memory operand"),
     }
 }
@@ -157,7 +166,7 @@ pub fn copyBytesToReg(src: AsmOperand, reg: AsmReg, count: usize) -> Vec<AsmInst
     for i in (0..count).rev() {
         out.push(AsmInstruction::Mov(
             AsmType::Byte,
-            addOffset(i as i32, &src),
+            addOffset(TypeUtils::layout_i32(i as i128), &src),
             AsmOperand::Reg(reg),
         ));
         if i != 0 {
@@ -177,7 +186,7 @@ pub fn copyBytesFromReg(reg: AsmReg, dst: AsmOperand, count: usize) -> Vec<AsmIn
         out.push(AsmInstruction::Mov(
             AsmType::Byte,
             AsmOperand::Reg(reg),
-            addOffset(i as i32, &dst),
+            addOffset(TypeUtils::layout_i32(i as i128), &dst),
         ));
         if i + 1 < count {
             out.push(binary(
@@ -221,8 +230,8 @@ pub fn convertType(t: &Type) -> AsmType {
         Type::Char | Type::SChar | Type::UChar => AsmType::Byte,
         Type::Double => AsmType::Double,
         Type::Array(_, _) | Type::Struct(_) => AsmType::ByteArray(AsmByteArrayInfo {
-            size: TypeUtils::get_size(t) as i32,
-            alignment: TypeUtils::get_alignment(t) as i32,
+            size: TypeUtils::get_size_i32(t),
+            alignment: TypeUtils::layout_i32(TypeUtils::get_alignment(t) as i128),
         }),
         Type::Function(_, _) | Type::Void => {
             panic!("Internal error, converting type to assembly: {t:?}")
@@ -287,7 +296,8 @@ fn classify_params(
                 let classes = ctx.classify_structure(tag);
                 let (mut ti, mut td) = (ints.clone(), dbls.clone());
                 for (i, c) in classes.iter().enumerate() {
-                    let o = AsmOperand::PseudoMem(name.clone(), (i * 8) as i32);
+                    let o =
+                        AsmOperand::PseudoMem(name.clone(), TypeUtils::layout_i32(i as i128 * 8));
                     match c {
                         ParamClass::SSE => td.push(o),
                         ParamClass::Integer => ti.push((getEightbyteType(i, size), o)),
@@ -301,7 +311,10 @@ fn classify_params(
                     for i in 0..classes.len() {
                         stack.push((
                             getEightbyteType(i, size),
-                            AsmOperand::PseudoMem(name.clone(), (i * 8) as i32),
+                            AsmOperand::PseudoMem(
+                                name.clone(),
+                                TypeUtils::layout_i32(i as i128 * 8),
+                            ),
                         ));
                     }
                 } else {
@@ -355,7 +368,7 @@ fn classify_return(
             };
             let (mut i, mut d) = (vec![], vec![]);
             for (idx, c) in c.iter().enumerate() {
-                let o = AsmOperand::PseudoMem(name.clone(), (idx * 8) as i32);
+                let o = AsmOperand::PseudoMem(name.clone(), TypeUtils::layout_i32(idx as i128 * 8));
                 match c {
                     ParamClass::SSE => d.push(o),
                     ParamClass::Integer => {
@@ -447,7 +460,7 @@ fn convert_call(
         }
     }
     out.push(AsmInstruction::Call(f.into()));
-    let remove = stack.len() as i64 * 8 + pad;
+    let remove = TypeUtils::layout_i64(stack.len() as i128 * 8 + pad as i128);
     if remove != 0 {
         out.push(binary(
             AsmBinaryOperator::Add,
@@ -874,10 +887,12 @@ fn add_ptr(ctx: &mut Context, x: &TackyAddPtrInfo) -> Vec<AsmInstruction> {
     let p = convertVal(ctx, &x.ptr);
     let d = convertVal(ctx, &x.dst);
     if let TackyVal::Constant(Constant::Long(i)) = &x.index {
-        return vec![
-            AsmInstruction::Mov(AsmType::Quadword, p, AsmOperand::Reg(AsmReg::R9)),
-            AsmInstruction::Lea(AsmOperand::Memory(AsmReg::R9, *i as i32 * x.scale), d),
-        ];
+        if let Some(displacement) = super::CheckedLayout::scaled_offset(*i, x.scale) {
+            return vec![
+                AsmInstruction::Mov(AsmType::Quadword, p, AsmOperand::Reg(AsmReg::R9)),
+                AsmInstruction::Lea(AsmOperand::Memory(AsmReg::R9, displacement), d),
+            ];
+        }
     }
     let i = convertVal(ctx, &x.index);
     let mut o = vec![
@@ -933,7 +948,7 @@ fn pass_params(ctx: &mut Context, params: &[TackyVal], stack_ret: bool) -> Vec<A
         ))
     }
     for (i, (t, p)) in stack.into_iter().enumerate() {
-        let s = AsmOperand::Memory(AsmReg::BP, 16 + i as i32 * 8);
+        let s = AsmOperand::Memory(AsmReg::BP, TypeUtils::layout_i32(16 + i as i128 * 8));
         match t {
             AsmType::ByteArray(x) => out.extend(copyBytes(s, p, x.size as usize)),
             _ => out.push(AsmInstruction::Mov(t, s, p)),
@@ -954,13 +969,13 @@ fn var_alignment(t: &Type) -> i32 {
     if matches!(t, Type::Array(..)) && TypeUtils::get_size(t) >= 16 {
         16
     } else {
-        TypeUtils::get_alignment(t) as i32
+        TypeUtils::layout_i32(TypeUtils::get_alignment(t) as i128)
     }
 }
 fn var_type(t: &Type) -> AsmType {
     if matches!(t, Type::Array(..)) {
         AsmType::ByteArray(AsmByteArrayInfo {
-            size: TypeUtils::get_size(t) as i32,
+            size: TypeUtils::get_size_i32(t),
             alignment: var_alignment(t),
         })
     } else {
@@ -990,7 +1005,7 @@ fn convert_top(ctx: &mut Context, top: &TackyTopLevel) -> AsmTopLevel {
         }),
         TackyTopLevel::StaticConstant(v) => AsmTopLevel::StaticConstant(AsmStaticConstantDef {
             name: v.name.clone(),
-            alignment: TypeUtils::get_alignment(&v.t) as i32,
+            alignment: TypeUtils::layout_i32(TypeUtils::get_alignment(&v.t) as i128),
             init: v.init.clone(),
         }),
     }

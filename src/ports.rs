@@ -53,3 +53,5 @@ port!(Rounding, "util/Rounding.rs");
 port!(StringUtil, "util/StringUtil.rs");
 port!(TypeUtils, "util/TypeUtils.rs");
 port!(UniqueIds, "util/UniqueIds.rs");
+
+port!(CheckedLayout, "util/CheckedLayout.rs");
